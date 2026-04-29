@@ -166,7 +166,7 @@
 // ─────────────────────────────────────────────
 // CONFIG
 // ─────────────────────────────────────────────
-const API_URL  = '/api/videos';
+const API_URL  = 'https://holotiles.stash.gentlebob.com/livestreams';
 const PAD      = 8;   // px padding around the conference area
 const GAP      = 6;   // px gap between tiles
 
@@ -175,16 +175,9 @@ const GAP      = 6;   // px gap between tiles
 // Expected JSON: [ { "id": "YOUTUBE_ID", "title": "..." }, … ]
 // ─────────────────────────────────────────────
 async function fetchVideos() {
-  // const res = await fetch(API_URL);
-  // if (!res.ok) throw new Error(`API returned ${res.status}`);
-  // return res.json();
-
-  return [
-    { id: 'rtQHMVuZaoE', title: 'rtQHMVuZaoE' },
-    { id: 'QLwtoUZ63_o', title: 'QLwtoUZ63_o' },
-    { id: '43TPT54WmwA', title: '43TPT54WmwA' },
-    { id: '4S0B8hbqkd8', title: '4S0B8hbqkd8' },
-  ];
+  const res = await fetch(API_URL);
+  if (!res.ok) throw new Error(`API returned ${res.status}`);
+  return res.json();
 }
 
 // ─────────────────────────────────────────────
