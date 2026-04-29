@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Conference</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+
+    /* Conference is a relative-positioned canvas; all players float inside it */
+    #conference {
+      position: relative;
+      width: 100%;
+      height: 100%;
+    }
+
+    /* Each player container is absolutely positioned; JS moves it via left/top/width/height.
+       CSS transitions animate the movement so swaps look smooth instead of jarring. */
+    .player-container {
+      position: absolute;
+      background: #161b22;
+      border-radius: 8px;
+      overflow: hidden;
+      outline: 2px solid transparent;
+      transition:
+        left   0.12s cubic-bezier(0.4, 0, 0.2, 1),
+        top    0.12s cubic-bezier(0.4, 0, 0.2, 1),
+        width  0.12s cubic-bezier(0.4, 0, 0.2, 1),
+        height 0.12s cubic-bezier(0.4, 0, 0.2, 1),
+        outline-color 0.05s;
+    }
+
+    .player-container.is-main {
+      outline-color: #238636;
+      border-radius: 10px;
+    }
+
+    .player-container:not(.is-main):hover {
+      outline-color: #58a6ff;
+    }
+
+    /* Player wrap fills the container so the iframe resizes with it */
+    .player-wrap {
+      width: 100%;
+      height: 100%;
+    }
+
+    .player-wrap iframe {
+      width: 100%;
+      height: 100%;
+      display: block;
+      border: none;
+    }
+
+    /* Transparent overlay blocks all YouTube UI and captures clicks */
+    .overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 10;
+      cursor: pointer;
+    }
+
+    .player-container.is-main > .overlay {
+      cursor: default;
+    }
+
+    /* Title label at the bottom of each tile */
+    .video-label {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      padding: 20px 8px 6px;
+      background: linear-gradient(transparent, rgba(0,0,0,0.75));
+      font-size: 11px;
+      font-weight: 500;
+      color: #e6edf3;
+      z-index: 12;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      pointer-events: none;
+    }
+
+    /* Mute badge shown on secondary tiles */
+    .mute-badge {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      z-index: 13;
+      font-size: 13px;
+      pointer-events: none;
+      opacity: 0.85;
+    }
+
+    /* Mute toggle button — fixed to the top-right of the viewport */
+    #mute-btn {
+      position: fixed;
+      top: 14px;
+      right: 16px;
+      z-index: 50;
+      background: rgba(0,0,0,0.55);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 6px;
+      color: #e6edf3;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 14px;
+      backdrop-filter: blur(4px);
+      transition: background 0.15s;
+      user-select: none;
+      display: none;
+    }
+
+    #mute-btn:hover { background: rgba(255,255,255,0.18); }
+
+    /* Loading / error screen */
+    #status {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      background: #0d1117;
+      z-index: 100;
+      font-size: 16px;
+    }
+
+    #status.hidden { display: none; }
+
+    .spinner {
+      width: 36px;
+      height: 36px;
+      border: 3px solid #30363d;
+      border-top-color: #58a6ff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+<div id="status">
+  <div class="spinner"></div>
+  <span id="status-text">Loading videos…</span>
+</div>
+
+<div id="conference"></div>
+<button id="mute-btn" title="Toggle mute">🔇</button>
+
+<script src="https://www.youtube.com/iframe_api"></script>
+<script>
+// ─────────────────────────────────────────────
+// CONFIG
+// ─────────────────────────────────────────────
+const API_URL  = '/api/videos';
+const PAD      = 8;   // px padding around the conference area
+const GAP      = 6;   // px gap between tiles
+
+// ─────────────────────────────────────────────
+// MOCK — swap fetchVideos() body for a real fetch() when backend is ready.
+// Expected JSON: [ { "id": "YOUTUBE_ID", "title": "..." }, … ]
+// ─────────────────────────────────────────────
+async function fetchVideos() {
+  // const res = await fetch(API_URL);
+  // if (!res.ok) throw new Error(`API returned ${res.status}`);
+  // return res.json();
+
+  return [
+    { id: 'rtQHMVuZaoE', title: 'rtQHMVuZaoE' },
+    { id: 'QLwtoUZ63_o', title: 'QLwtoUZ63_o' },
+    { id: '43TPT54WmwA', title: '43TPT54WmwA' },
+    { id: '4S0B8hbqkd8', title: '4S0B8hbqkd8' },
+  ];
+}
+
+// ─────────────────────────────────────────────
+// STATE
+// ─────────────────────────────────────────────
+let videos       = [];  // [{id, title}] from API
+let players      = [];  // YT.Player[i] — never reordered
+let containers   = [];  // HTMLElement[i] — player wrapper divs, never reordered
+let positionOrder = []; // positionOrder[slot] = playerIndex; slot 0 = main
+let mainMuted    = false;
+let ytReady      = false;
+let pendingInit  = false;
+
+// ─────────────────────────────────────────────
+// YOUTUBE API CALLBACK
+// ─────────────────────────────────────────────
+window.onYouTubeIframeAPIReady = () => {
+  ytReady = true;
+  if (pendingInit) buildPlayers();
+};
+
+// ─────────────────────────────────────────────
+// BOOTSTRAP
+// ─────────────────────────────────────────────
+(async () => {
+  try {
+    videos = await fetchVideos();
+    if (!videos.length) throw new Error('No videos returned from API.');
+    positionOrder = videos.map((_, i) => i); // [0, 1, 2, ...]
+
+    if (ytReady) buildPlayers();
+    else pendingInit = true;
+  } catch (err) {
+    document.getElementById('status-text').textContent = `Error: ${err.message}`;
+    document.querySelector('.spinner').style.display = 'none';
+  }
+})();
+
+// ─────────────────────────────────────────────
+// BUILD DOM + PLAYERS
+// All containers are created once and never moved in the DOM.
+// Layout is applied purely via CSS left/top/width/height.
+// ─────────────────────────────────────────────
+function buildPlayers() {
+  const conf = document.getElementById('conference');
+
+  for (let i = 0; i < videos.length; i++) {
+    // Container div — this never moves in the DOM
+    const container = document.createElement('div');
+    container.className = 'player-container';
+    container.id = `container-${i}`;
+
+    // Player target div
+    const playerDiv = document.createElement('div');
+    playerDiv.className = 'player-wrap';
+    const playerTarget = document.createElement('div');
+    playerTarget.id = `yt-player-${i}`;
+    playerDiv.appendChild(playerTarget);
+    container.appendChild(playerDiv);
+
+    // Overlay — intercepts clicks on the YouTube iframe
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    overlay.addEventListener('click', () => onPlayerClick(i));
+    container.appendChild(overlay);
+
+    // Title label
+    const label = document.createElement('div');
+    label.className = 'video-label';
+    label.id = `label-${i}`;
+    label.textContent = videos[i].title;
+    container.appendChild(label);
+
+    // Mute badge (hidden on main)
+    const badge = document.createElement('div');
+    badge.className = 'mute-badge';
+    badge.id = `badge-${i}`;
+    badge.textContent = '🔇';
+    container.appendChild(badge);
+
+    conf.appendChild(container);
+    containers.push(container);
+
+    // Create YT player
+    players.push(new YT.Player(`yt-player-${i}`, {
+      width: '100%',
+      height: '100%',
+      videoId: videos[i].id,
+      playerVars: { controls: 0, disablekb: 1, modestbranding: 1, rel: 0, autoplay: 1, mute: 1 },
+      events: {
+        onReady(e) { e.target.mute(); e.target.playVideo(); },
+      },
+    }));
+  }
+
+  // Wire up mute button
+  const muteBtn = document.getElementById('mute-btn');
+  muteBtn.style.display = 'block';
+  muteBtn.addEventListener('click', toggleMainMute);
+
+  // Show the conference, hide the loading screen
+  document.getElementById('status').classList.add('hidden');
+
+  // Initial layout + listen for window resize
+  applyLayout();
+  new ResizeObserver(applyLayout).observe(document.getElementById('conference'));
+}
+
+// ─────────────────────────────────────────────
+// LAYOUT — calculates rects for every slot and
+// applies them to containers via CSS properties.
+// DOM order never changes; only CSS values change.
+// ─────────────────────────────────────────────
+function calculateRects(W, H) {
+  const n = videos.length;
+  const secCount = n - 1;
+
+  // Landscape: main left, secondary strip on right
+  if (W >= H) {
+    const stripW  = Math.round(Math.min(Math.max(W * 0.22, 160), 280));
+    const mainW   = W - PAD * 2 - GAP - stripW;
+    const mainH   = H - PAD * 2;
+    const mainRect = { x: PAD, y: PAD, w: mainW, h: mainH };
+
+    const secW = stripW;
+    const secH = Math.round(secW * 9 / 16);
+    const secRects = [];
+    for (let s = 0; s < secCount; s++) {
+      secRects.push({
+        x: PAD + mainW + GAP,
+        y: PAD + s * (secH + GAP),
+        w: secW,
+        h: secH,
+      });
+    }
+    return [mainRect, ...secRects];
+  }
+
+  // Portrait: main top, secondary strip on bottom
+  const stripH  = Math.round(Math.min(Math.max(H * 0.22, 90), 180));
+  const mainW   = W - PAD * 2;
+  const mainH   = H - PAD * 2 - GAP - stripH;
+  const mainRect = { x: PAD, y: PAD, w: mainW, h: mainH };
+
+  const secH = stripH;
+  const secW = Math.round(secH * 16 / 9);
+  const secRects = [];
+  for (let s = 0; s < secCount; s++) {
+    secRects.push({
+      x: PAD + s * (secW + GAP),
+      y: PAD + mainH + GAP,
+      w: secW,
+      h: secH,
+    });
+  }
+  return [mainRect, ...secRects];
+}
+
+function applyLayout() {
+  const conf = document.getElementById('conference');
+  const W = conf.clientWidth;
+  const H = conf.clientHeight;
+  const rects = calculateRects(W, H);
+
+  for (let slot = 0; slot < positionOrder.length; slot++) {
+    const playerIdx = positionOrder[slot];
+    const el = containers[playerIdx];
+    const r  = rects[slot];
+
+    el.style.left   = r.x + 'px';
+    el.style.top    = r.y + 'px';
+    el.style.width  = r.w + 'px';
+    el.style.height = r.h + 'px';
+
+    const isMain = slot === 0;
+    el.classList.toggle('is-main', isMain);
+
+    // Show/hide mute badge
+    const badge = document.getElementById(`badge-${playerIdx}`);
+    if (badge) badge.style.display = isMain ? 'none' : '';
+  }
+}
+
+// ─────────────────────────────────────────────
+// SWAP — only positionOrder changes; no DOM moves
+// ─────────────────────────────────────────────
+function onPlayerClick(playerIdx) {
+  const currentSlot = positionOrder.indexOf(playerIdx);
+  if (currentSlot === 0) return; // already main
+
+  // Swap this player into slot 0 (main), move current main into this slot
+  const prevMain = positionOrder[0];
+  positionOrder[0]           = playerIdx;
+  positionOrder[currentSlot] = prevMain;
+
+  applyLayout();
+  updateAudio();
+}
+
+// ─────────────────────────────────────────────
+// AUDIO — main player respects mainMuted toggle;
+// all secondary players are always muted
+// ─────────────────────────────────────────────
+function updateAudio() {
+  const mainPlayerIdx = positionOrder[0];
+  for (let i = 0; i < players.length; i++) {
+    if (!players[i]?.mute) continue;
+    if (i === mainPlayerIdx) {
+      mainMuted ? players[i].mute() : players[i].unMute();
+    } else {
+      players[i].mute();
+    }
+  }
+}
+
+function toggleMainMute() {
+  mainMuted = !mainMuted;
+  updateAudio();
+  const btn = document.getElementById('mute-btn');
+  btn.textContent = mainMuted ? '🔇' : '🔊';
+  btn.title       = mainMuted ? 'Unmute' : 'Mute';
+}
+</script>
+</body>
+</html>
