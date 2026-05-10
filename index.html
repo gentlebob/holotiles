@@ -47,8 +47,8 @@
     }
 
     .player-container.is-main {
-      border-color: #0f62fe;
-      outline-color: #0f62fe;
+      border-color: transparent;
+      outline-color: transparent;
     }
 
     .player-container:not(.is-main):hover {
@@ -221,6 +221,8 @@
       background: #161616;
       border: 1px solid #262626;
       border-radius: 0;
+      outline: 2px solid transparent;
+      outline-offset: -2px;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -233,6 +235,11 @@
       letter-spacing: 0.32px;
       color: #8d8d8d;
       overflow: hidden;
+    }
+
+    .placeholder.is-selected {
+      border-color: #0f62fe;
+      outline-color: #0f62fe;
     }
   </style>
 </head>
@@ -457,14 +464,16 @@ function applyLayout() {
     const homeX = axis === 'x' ? i * (secW + GAP) : 0;
     const homeY = axis === 'y' ? i * (secH + GAP) : 0;
 
+    const isMain = (i === mainPlayerIdx);
+
     const ph = placeholders[i];
     ph.style.left   = homeX + 'px';
     ph.style.top    = homeY + 'px';
     ph.style.width  = secW + 'px';
     ph.style.height = secH + 'px';
+    ph.classList.toggle('is-selected', isMain);
 
     const el = containers[i];
-    const isMain = (i === mainPlayerIdx);
     el.classList.toggle('is-main', isMain);
 
     if (isMain) {
