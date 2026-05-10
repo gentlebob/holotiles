@@ -42,10 +42,6 @@
       outline: 2px solid transparent;
       outline-offset: -2px;
       transition:
-        left   0.12s cubic-bezier(0.4, 0, 0.2, 1),
-        top    0.12s cubic-bezier(0.4, 0, 0.2, 1),
-        width  0.12s cubic-bezier(0.4, 0, 0.2, 1),
-        height 0.12s cubic-bezier(0.4, 0, 0.2, 1),
         outline-color 0.05s,
         border-color 0.05s;
     }
@@ -217,10 +213,27 @@
       position: fixed;
     }
 
-    /* During a swap the containing block changes (fixed↔absolute), so
-       transitioning left/top/width/height would interpolate across two
-       different coordinate systems and look wrong. Snap instead. */
-    .swapping .player-container { transition: none !important; }
+    /* Placeholder — every video has a permanent home slot in the strip.
+       When the video is in the main slot, its home shows the placeholder;
+       otherwise the player container sits on top and covers it. */
+    .placeholder {
+      position: absolute;
+      background: #161616;
+      border: 1px solid #262626;
+      border-radius: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px;
+      text-align: center;
+      font-family: 'IBM Plex Sans', 'Helvetica Neue', Arial, sans-serif;
+      font-size: 12px;
+      font-weight: 400;
+      line-height: 1.33;
+      letter-spacing: 0.32px;
+      color: #8d8d8d;
+      overflow: hidden;
+    }
   </style>
 </head>
 <body>
@@ -238,7 +251,7 @@
 // ─────────────────────────────────────────────
 // CONFIG
 // ─────────────────────────────────────────────
-const API_URL  = 'https://holotiles.stash.gentlebob.com/livestreams2';
+const API_URL  = 'https://holotiles.stash.gentlebob.com/livestreams';
 const PAD      = 16;  // px padding around the conference area (Carbon spacing.md)
 const GAP      = 8;   // px gap between tiles (Carbon spacing.xs)
 
@@ -258,7 +271,8 @@ async function fetchVideos() {
 let videos       = [];  // [{id, title}] from API
 let players      = [];  // YT.Player[i] — never reordered
 let containers   = [];  // HTMLElement[i] — player wrapper divs, never reordered
-let positionOrder = []; // positionOrder[slot] = playerIndex; slot 0 = main
+let placeholders = [];  // HTMLElement[i] — fixed home-slot tiles in the strip
+let mainPlayerIdx = 0;  // index of the video currently in the main slot
 let mainMuted    = false;
 let ytReady      = false;
 let pendingInit  = false;
@@ -278,7 +292,6 @@ window.onYouTubeIframeAPIReady = () => {
   try {
     videos = await fetchVideos();
     if (!videos.length) throw new Error('No videos returned from API.');
-    positionOrder = videos.map((_, i) => i); // [0, 1, 2, ...]
 
     if (ytReady) buildPlayers();
     else pendingInit = true;
@@ -305,6 +318,18 @@ function buildPlayers() {
   spacer.id = 'strip-spacer';
   strip.appendChild(spacer);
   conf.appendChild(strip);
+
+  // Placeholders — one per video, sitting at each video's permanent home
+  // slot. Earlier in the DOM than player containers, so the player tile
+  // covers its placeholder when it's home.
+  for (let i = 0; i < videos.length; i++) {
+    const ph = document.createElement('div');
+    ph.className = 'placeholder';
+    ph.id = `placeholder-${i}`;
+    ph.textContent = videos[i].title;
+    strip.appendChild(ph);
+    placeholders.push(ph);
+  }
 
   for (let i = 0; i < videos.length; i++) {
     // Container div — this never moves in the DOM
@@ -360,6 +385,9 @@ function buildPlayers() {
   muteBtn.style.display = 'block';
   muteBtn.addEventListener('click', toggleMainMute);
 
+  // Arrow-key cycling — Up/Left = previous, Down/Right = next, wraps.
+  window.addEventListener('keydown', onKeyDown);
+
   // Show the conference, hide the loading screen
   document.getElementById('status').classList.add('hidden');
 
@@ -369,9 +397,11 @@ function buildPlayers() {
 }
 
 // ─────────────────────────────────────────────
-// LAYOUT — sizes the strip wrapper, spacer, and all containers.
-// Main slot = position:fixed at viewport coords (escapes strip overflow).
-// Secondary slots = position:absolute in strip-content coords (ride scroll).
+// LAYOUT — sizes the strip wrapper, spacer, placeholders, and all
+// containers. Each video has a permanent home slot in the strip.
+// Main slot   = position:fixed at viewport coords (escapes strip overflow).
+// Home slot   = position:absolute in strip-content coords (rides scroll).
+// When a video is main, its home slot shows the placeholder underneath.
 // ─────────────────────────────────────────────
 function applyLayout() {
   const conf = document.getElementById('conference');
@@ -380,7 +410,6 @@ function applyLayout() {
   const W = conf.clientWidth;
   const H = conf.clientHeight;
   const n = videos.length;
-  const secCount = n - 1;
 
   let mainRect, stripRect, contentW, contentH, secW, secH, axis;
 
@@ -394,7 +423,7 @@ function applyLayout() {
     secW = stripW;
     secH = Math.round(secW * 9 / 16);
     contentW = secW;
-    contentH = secCount * secH + Math.max(0, secCount - 1) * GAP;
+    contentH = n * secH + Math.max(0, n - 1) * GAP;
     axis = 'y';
   } else {
     // Portrait: main top, secondary row scrolls horizontally on the bottom
@@ -405,7 +434,7 @@ function applyLayout() {
     stripRect = { x: PAD, y: PAD + mainH + GAP, w: W - PAD * 2, h: stripH };
     secH = stripH;
     secW = Math.round(secH * 16 / 9);
-    contentW = secCount * secW + Math.max(0, secCount - 1) * GAP;
+    contentW = n * secW + Math.max(0, n - 1) * GAP;
     contentH = secH;
     axis = 'x';
   }
@@ -422,62 +451,72 @@ function applyLayout() {
   spacer.style.width  = contentW + 'px';
   spacer.style.height = contentH + 'px';
 
-  for (let slot = 0; slot < positionOrder.length; slot++) {
-    const playerIdx = positionOrder[slot];
-    const el = containers[playerIdx];
-    const isMain = slot === 0;
+  // Position each video's placeholder + container at its home slot.
+  // The main video's container is overridden to position:fixed at mainRect.
+  for (let i = 0; i < n; i++) {
+    const homeX = axis === 'x' ? i * (secW + GAP) : 0;
+    const homeY = axis === 'y' ? i * (secH + GAP) : 0;
+
+    const ph = placeholders[i];
+    ph.style.left   = homeX + 'px';
+    ph.style.top    = homeY + 'px';
+    ph.style.width  = secW + 'px';
+    ph.style.height = secH + 'px';
+
+    const el = containers[i];
+    const isMain = (i === mainPlayerIdx);
     el.classList.toggle('is-main', isMain);
 
     if (isMain) {
-      // position:fixed, viewport coords
       el.style.left   = mainRect.x + 'px';
       el.style.top    = mainRect.y + 'px';
       el.style.width  = mainRect.w + 'px';
       el.style.height = mainRect.h + 'px';
     } else {
-      // position:absolute inside #strip's content; the secCount-1 index
-      // (since slot 0 is main) maps to the slot's pixel offset.
-      const s = slot - 1;
-      el.style.left   = (axis === 'x' ? s * (secW + GAP) : 0) + 'px';
-      el.style.top    = (axis === 'y' ? s * (secH + GAP) : 0) + 'px';
+      el.style.left   = homeX + 'px';
+      el.style.top    = homeY + 'px';
       el.style.width  = secW + 'px';
       el.style.height = secH + 'px';
     }
 
-    // Show/hide mute badge
-    const badge = document.getElementById(`badge-${playerIdx}`);
+    const badge = document.getElementById(`badge-${i}`);
     if (badge) badge.style.display = isMain ? 'none' : '';
   }
 }
 
 // ─────────────────────────────────────────────
-// SWAP — only positionOrder + CSS classes change; no DOM moves.
-// The .swapping class disables transitions during the position-type
-// flip (absolute↔fixed) so the snap is clean instead of glitching.
+// KEY NAV — Up/Left = previous, Down/Right = next, wraps at the ends.
+// Scrolls the strip so the selected video's home slot is in view.
+// ─────────────────────────────────────────────
+function onKeyDown(e) {
+  let delta = 0;
+  if (e.key === 'ArrowUp' || e.key === 'ArrowLeft')  delta = -1;
+  else if (e.key === 'ArrowDown' || e.key === 'ArrowRight') delta =  1;
+  else return;
+  e.preventDefault();
+  const n = videos.length;
+  if (n < 2) return;
+  onPlayerClick((mainPlayerIdx + delta + n) % n);
+  placeholders[mainPlayerIdx].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+// ─────────────────────────────────────────────
+// SWAP — clicking a video promotes it to main; the previous main
+// returns to its own home slot (no positional swap). Only mainPlayerIdx
+// + CSS classes change; no DOM moves.
 // ─────────────────────────────────────────────
 function onPlayerClick(playerIdx) {
-  const currentSlot = positionOrder.indexOf(playerIdx);
-  if (currentSlot === 0) return; // already main
-
-  const prevMain = positionOrder[0];
-  positionOrder[0]           = playerIdx;
-  positionOrder[currentSlot] = prevMain;
-
-  const conf = document.getElementById('conference');
-  conf.classList.add('swapping');
+  if (playerIdx === mainPlayerIdx) return;
+  mainPlayerIdx = playerIdx;
   applyLayout();
   updateAudio();
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    conf.classList.remove('swapping');
-  }));
 }
 
 // ─────────────────────────────────────────────
 // AUDIO — main player respects mainMuted toggle;
-// all secondary players are always muted
+// all other players are always muted
 // ─────────────────────────────────────────────
 function updateAudio() {
-  const mainPlayerIdx = positionOrder[0];
   for (let i = 0; i < players.length; i++) {
     if (!players[i]?.mute) continue;
     if (i === mainPlayerIdx) {
