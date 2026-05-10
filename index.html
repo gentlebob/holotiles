@@ -182,16 +182,45 @@
 
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* Custom strip scrollbar — Carbon gray-60 thumb on the strip edge */
-    #strip-indicator {
+    /* Strip — native scroll wrapper for the secondary tile column/row.
+       Sized + axis switched in JS based on landscape/portrait. */
+    #strip {
       position: absolute;
-      background: #6f6f6f;
-      pointer-events: none;
-      display: none;
-      z-index: 20;
-      border-radius: 0;
-      transition: opacity 0.15s;
+      overflow: hidden;
+      background: #000000;
+      scrollbar-gutter: stable;
     }
+    #strip.scroll-y { overflow-y: auto; overflow-x: hidden; }
+    #strip.scroll-x { overflow-x: auto; overflow-y: hidden; }
+
+    /* Carbon-style scrollbar for the strip on dark surfaces */
+    #strip::-webkit-scrollbar { width: 8px; height: 8px; }
+    #strip::-webkit-scrollbar-track { background: transparent; }
+    #strip::-webkit-scrollbar-thumb {
+      background: #393939;
+      border-radius: 0;
+    }
+    #strip::-webkit-scrollbar-thumb:hover { background: #525252; }
+    #strip { scrollbar-color: #393939 transparent; scrollbar-width: thin; }
+
+    /* Spacer inside the strip — its size sets the scrollable extent
+       so the absolutely-positioned secondary tiles can be reached. */
+    #strip-spacer {
+      position: relative;
+      width: 1px;
+      height: 1px;
+    }
+
+    /* The main slot uses position:fixed so it escapes the strip's
+       overflow clipping and can sit in the main area. */
+    .player-container.is-main {
+      position: fixed;
+    }
+
+    /* During a swap the containing block changes (fixed↔absolute), so
+       transitioning left/top/width/height would interpolate across two
+       different coordinate systems and look wrong. Snap instead. */
+    .swapping .player-container { transition: none !important; }
   </style>
 </head>
 <body>
@@ -233,8 +262,6 @@ let positionOrder = []; // positionOrder[slot] = playerIndex; slot 0 = main
 let mainMuted    = false;
 let ytReady      = false;
 let pendingInit  = false;
-let stripScroll  = 0;     // px scroll offset within the secondary strip
-let stripBounds  = null;  // { x, y, w, h, axis: 'y'|'x', maxScroll }
 
 // ─────────────────────────────────────────────
 // YOUTUBE API CALLBACK
@@ -263,11 +290,21 @@ window.onYouTubeIframeAPIReady = () => {
 
 // ─────────────────────────────────────────────
 // BUILD DOM + PLAYERS
-// All containers are created once and never moved in the DOM.
-// Layout is applied purely via CSS left/top/width/height.
+// All player containers live inside #strip and never move in the DOM
+// (DOM moves reload iframes). The "main" slot uses position:fixed to
+// escape the strip's overflow clipping; secondary slots use
+// position:absolute so they ride the strip's native scroll.
 // ─────────────────────────────────────────────
 function buildPlayers() {
   const conf = document.getElementById('conference');
+
+  // Strip wrapper — provides native overflow scrolling for secondary tiles
+  const strip = document.createElement('div');
+  strip.id = 'strip';
+  const spacer = document.createElement('div');
+  spacer.id = 'strip-spacer';
+  strip.appendChild(spacer);
+  conf.appendChild(strip);
 
   for (let i = 0; i < videos.length; i++) {
     // Container div — this never moves in the DOM
@@ -303,7 +340,7 @@ function buildPlayers() {
     badge.textContent = '🔇';
     container.appendChild(badge);
 
-    conf.appendChild(container);
+    strip.appendChild(container);
     containers.push(container);
 
     // Create YT player
@@ -318,234 +355,121 @@ function buildPlayers() {
     }));
   }
 
-  // Strip scroll indicator (Carbon-style flat thumb)
-  const indicator = document.createElement('div');
-  indicator.id = 'strip-indicator';
-  conf.appendChild(indicator);
-
   // Wire up mute button
   const muteBtn = document.getElementById('mute-btn');
   muteBtn.style.display = 'block';
   muteBtn.addEventListener('click', toggleMainMute);
-
-  // Wire up strip scroll (wheel + touch)
-  conf.addEventListener('wheel', onWheel, { passive: false });
-  conf.addEventListener('touchstart', onTouchStart, { passive: true });
-  conf.addEventListener('touchmove', onTouchMove, { passive: false });
-  conf.addEventListener('touchend', onTouchEnd);
-  conf.addEventListener('touchcancel', onTouchEnd);
 
   // Show the conference, hide the loading screen
   document.getElementById('status').classList.add('hidden');
 
   // Initial layout + listen for window resize
   applyLayout();
-  new ResizeObserver(applyLayout).observe(document.getElementById('conference'));
+  new ResizeObserver(applyLayout).observe(conf);
 }
 
 // ─────────────────────────────────────────────
-// LAYOUT — calculates rects for every slot and
-// applies them to containers via CSS properties.
-// DOM order never changes; only CSS values change.
+// LAYOUT — sizes the strip wrapper, spacer, and all containers.
+// Main slot = position:fixed at viewport coords (escapes strip overflow).
+// Secondary slots = position:absolute in strip-content coords (ride scroll).
 // ─────────────────────────────────────────────
-function calculateRects(W, H) {
+function applyLayout() {
+  const conf = document.getElementById('conference');
+  const strip = document.getElementById('strip');
+  const spacer = document.getElementById('strip-spacer');
+  const W = conf.clientWidth;
+  const H = conf.clientHeight;
   const n = videos.length;
   const secCount = n - 1;
 
-  // Landscape: main left, secondary strip on right
+  let mainRect, stripRect, contentW, contentH, secW, secH, axis;
+
   if (W >= H) {
-    const stripW  = Math.round(Math.min(Math.max(W * 0.22, 160), 280));
-    const mainW   = W - PAD * 2 - GAP - stripW;
-    const mainH   = H - PAD * 2;
-    const mainRect = { x: PAD, y: PAD, w: mainW, h: mainH };
-
-    const secW = stripW;
-    const secH = Math.round(secW * 9 / 16);
-    const stripX = PAD + mainW + GAP;
-    const stripY = PAD;
-    const stripVisH = H - PAD * 2;
-    const totalH = secCount * secH + Math.max(0, secCount - 1) * GAP;
-    const maxScroll = Math.max(0, totalH - stripVisH);
-    stripScroll = Math.max(0, Math.min(stripScroll, maxScroll));
-    stripBounds = { x: stripX, y: stripY, w: stripW, h: stripVisH, axis: 'y', maxScroll };
-
-    const secRects = [];
-    for (let s = 0; s < secCount; s++) {
-      secRects.push({
-        x: stripX,
-        y: stripY + s * (secH + GAP) - stripScroll,
-        w: secW,
-        h: secH,
-      });
-    }
-    return [mainRect, ...secRects];
+    // Landscape: main left, secondary column scrolls vertically on the right
+    const stripW = Math.round(Math.min(Math.max(W * 0.22, 160), 280));
+    const mainW  = W - PAD * 2 - GAP - stripW;
+    const mainH  = H - PAD * 2;
+    mainRect  = { x: PAD, y: PAD, w: mainW, h: mainH };
+    stripRect = { x: PAD + mainW + GAP, y: PAD, w: stripW, h: H - PAD * 2 };
+    secW = stripW;
+    secH = Math.round(secW * 9 / 16);
+    contentW = secW;
+    contentH = secCount * secH + Math.max(0, secCount - 1) * GAP;
+    axis = 'y';
+  } else {
+    // Portrait: main top, secondary row scrolls horizontally on the bottom
+    const stripH = Math.round(Math.min(Math.max(H * 0.22, 90), 180));
+    const mainW  = W - PAD * 2;
+    const mainH  = H - PAD * 2 - GAP - stripH;
+    mainRect  = { x: PAD, y: PAD, w: mainW, h: mainH };
+    stripRect = { x: PAD, y: PAD + mainH + GAP, w: W - PAD * 2, h: stripH };
+    secH = stripH;
+    secW = Math.round(secH * 16 / 9);
+    contentW = secCount * secW + Math.max(0, secCount - 1) * GAP;
+    contentH = secH;
+    axis = 'x';
   }
 
-  // Portrait: main top, secondary strip on bottom
-  const stripH  = Math.round(Math.min(Math.max(H * 0.22, 90), 180));
-  const mainW   = W - PAD * 2;
-  const mainH   = H - PAD * 2 - GAP - stripH;
-  const mainRect = { x: PAD, y: PAD, w: mainW, h: mainH };
+  // Position the strip wrapper and switch its scroll axis
+  strip.style.left   = stripRect.x + 'px';
+  strip.style.top    = stripRect.y + 'px';
+  strip.style.width  = stripRect.w + 'px';
+  strip.style.height = stripRect.h + 'px';
+  strip.classList.toggle('scroll-y', axis === 'y');
+  strip.classList.toggle('scroll-x', axis === 'x');
 
-  const secH = stripH;
-  const secW = Math.round(secH * 16 / 9);
-  const stripX = PAD;
-  const stripY = PAD + mainH + GAP;
-  const stripVisW = W - PAD * 2;
-  const totalW = secCount * secW + Math.max(0, secCount - 1) * GAP;
-  const maxScroll = Math.max(0, totalW - stripVisW);
-  stripScroll = Math.max(0, Math.min(stripScroll, maxScroll));
-  stripBounds = { x: stripX, y: stripY, w: stripVisW, h: stripH, axis: 'x', maxScroll };
-
-  const secRects = [];
-  for (let s = 0; s < secCount; s++) {
-    secRects.push({
-      x: stripX + s * (secW + GAP) - stripScroll,
-      y: stripY,
-      w: secW,
-      h: secH,
-    });
-  }
-  return [mainRect, ...secRects];
-}
-
-function applyLayout() {
-  const conf = document.getElementById('conference');
-  const W = conf.clientWidth;
-  const H = conf.clientHeight;
-  const rects = calculateRects(W, H);
+  // Spacer defines the scrollable extent so absolute children are reachable
+  spacer.style.width  = contentW + 'px';
+  spacer.style.height = contentH + 'px';
 
   for (let slot = 0; slot < positionOrder.length; slot++) {
     const playerIdx = positionOrder[slot];
     const el = containers[playerIdx];
-    const r  = rects[slot];
-
-    el.style.left   = r.x + 'px';
-    el.style.top    = r.y + 'px';
-    el.style.width  = r.w + 'px';
-    el.style.height = r.h + 'px';
-
     const isMain = slot === 0;
     el.classList.toggle('is-main', isMain);
 
-    // Clip secondary tiles to the strip viewport so scrolled tiles
-    // don't bleed into the main area or the page padding.
-    if (!isMain && stripBounds) {
-      const top    = Math.max(0, stripBounds.y - r.y);
-      const left   = Math.max(0, stripBounds.x - r.x);
-      const bottom = Math.max(0, (r.y + r.h) - (stripBounds.y + stripBounds.h));
-      const right  = Math.max(0, (r.x + r.w) - (stripBounds.x + stripBounds.w));
-      el.style.clipPath = `inset(${top}px ${right}px ${bottom}px ${left}px)`;
+    if (isMain) {
+      // position:fixed, viewport coords
+      el.style.left   = mainRect.x + 'px';
+      el.style.top    = mainRect.y + 'px';
+      el.style.width  = mainRect.w + 'px';
+      el.style.height = mainRect.h + 'px';
     } else {
-      el.style.clipPath = '';
+      // position:absolute inside #strip's content; the secCount-1 index
+      // (since slot 0 is main) maps to the slot's pixel offset.
+      const s = slot - 1;
+      el.style.left   = (axis === 'x' ? s * (secW + GAP) : 0) + 'px';
+      el.style.top    = (axis === 'y' ? s * (secH + GAP) : 0) + 'px';
+      el.style.width  = secW + 'px';
+      el.style.height = secH + 'px';
     }
 
     // Show/hide mute badge
     const badge = document.getElementById(`badge-${playerIdx}`);
     if (badge) badge.style.display = isMain ? 'none' : '';
   }
-
-  updateStripIndicator();
 }
 
 // ─────────────────────────────────────────────
-// STRIP SCROLL — custom virtual scroll for the secondary tile strip.
-// We can't use native overflow because all .player-container divs must
-// stay siblings of #conference (DOM moves reload iframes).
-// ─────────────────────────────────────────────
-function updateStripIndicator() {
-  const ind = document.getElementById('strip-indicator');
-  if (!ind || !stripBounds || stripBounds.maxScroll <= 0) {
-    if (ind) ind.style.display = 'none';
-    return;
-  }
-  ind.style.display = 'block';
-  if (stripBounds.axis === 'y') {
-    const total = stripBounds.h + stripBounds.maxScroll;
-    const thumbH = Math.max(24, Math.round(stripBounds.h * stripBounds.h / total));
-    const thumbY = stripBounds.y + Math.round((stripBounds.h - thumbH) * (stripScroll / stripBounds.maxScroll));
-    ind.style.left   = (stripBounds.x + stripBounds.w - 3) + 'px';
-    ind.style.top    = thumbY + 'px';
-    ind.style.width  = '3px';
-    ind.style.height = thumbH + 'px';
-  } else {
-    const total = stripBounds.w + stripBounds.maxScroll;
-    const thumbW = Math.max(24, Math.round(stripBounds.w * stripBounds.w / total));
-    const thumbX = stripBounds.x + Math.round((stripBounds.w - thumbW) * (stripScroll / stripBounds.maxScroll));
-    ind.style.left   = thumbX + 'px';
-    ind.style.top    = (stripBounds.y + stripBounds.h - 3) + 'px';
-    ind.style.width  = thumbW + 'px';
-    ind.style.height = '3px';
-  }
-}
-
-function pointerInStrip(clientX, clientY) {
-  if (!stripBounds) return false;
-  const rect = document.getElementById('conference').getBoundingClientRect();
-  const x = clientX - rect.left;
-  const y = clientY - rect.top;
-  return x >= stripBounds.x && x <= stripBounds.x + stripBounds.w
-      && y >= stripBounds.y && y <= stripBounds.y + stripBounds.h;
-}
-
-function scrollStripBy(delta) {
-  if (!stripBounds || stripBounds.maxScroll <= 0) return false;
-  const next = Math.max(0, Math.min(stripScroll + delta, stripBounds.maxScroll));
-  if (next === stripScroll) return false;
-  stripScroll = next;
-  applyLayout();
-  return true;
-}
-
-function onWheel(e) {
-  if (!pointerInStrip(e.clientX, e.clientY)) return;
-  const delta = stripBounds.axis === 'y'
-    ? (e.deltaY || e.deltaX)
-    : (e.deltaX || e.deltaY);
-  if (scrollStripBy(delta)) e.preventDefault();
-}
-
-let touchAnchor = null; // { clientX, clientY, scrollStart }
-
-function onTouchStart(e) {
-  if (e.touches.length !== 1) return;
-  const t = e.touches[0];
-  if (!pointerInStrip(t.clientX, t.clientY)) return;
-  touchAnchor = { clientX: t.clientX, clientY: t.clientY, scrollStart: stripScroll };
-}
-
-function onTouchMove(e) {
-  if (!touchAnchor || !stripBounds) return;
-  const t = e.touches[0];
-  const delta = stripBounds.axis === 'y'
-    ? touchAnchor.clientY - t.clientY
-    : touchAnchor.clientX - t.clientX;
-  const next = Math.max(0, Math.min(touchAnchor.scrollStart + delta, stripBounds.maxScroll));
-  if (next !== stripScroll) {
-    stripScroll = next;
-    applyLayout();
-  }
-  e.preventDefault();
-}
-
-function onTouchEnd() {
-  touchAnchor = null;
-}
-
-// ─────────────────────────────────────────────
-// SWAP — only positionOrder changes; no DOM moves
+// SWAP — only positionOrder + CSS classes change; no DOM moves.
+// The .swapping class disables transitions during the position-type
+// flip (absolute↔fixed) so the snap is clean instead of glitching.
 // ─────────────────────────────────────────────
 function onPlayerClick(playerIdx) {
   const currentSlot = positionOrder.indexOf(playerIdx);
   if (currentSlot === 0) return; // already main
 
-  // Swap this player into slot 0 (main), move current main into this slot
   const prevMain = positionOrder[0];
   positionOrder[0]           = playerIdx;
   positionOrder[currentSlot] = prevMain;
 
+  const conf = document.getElementById('conference');
+  conf.classList.add('swapping');
   applyLayout();
   updateAudio();
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    conf.classList.remove('swapping');
+  }));
 }
 
 // ─────────────────────────────────────────────
